@@ -5,13 +5,14 @@ import "encoding/json"
 // FileMeta holds metadata for a single indexed path.
 // It is serialized as JSON for storage in the paths LMDB database.
 type FileMeta struct {
-	Path      string `json:"path"`
-	Filename  string `json:"filename"`
-	Parent    string `json:"parent"`
-	Extension string `json:"extension"`
-	IsDir     bool   `json:"is_dir"`
-	Modified  int64  `json:"modified"`
-	Depth     int    `json:"depth"`
+	Path             string `json:"path"`
+	Filename         string `json:"filename"`
+	OriginalFilename string `json:"original_filename"`
+	Parent           string `json:"parent"`
+	Extension        string `json:"extension"`
+	IsDir            bool   `json:"is_dir"`
+	Modified         int64  `json:"modified"`
+	Depth            int    `json:"depth"`
 }
 
 // Marshal serializes FileMeta to JSON bytes.

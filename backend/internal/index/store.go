@@ -3,6 +3,8 @@ package index
 import (
 	"fmt"
 	"os"
+	"path"
+	"strings"
 	"sync"
 
 	"github.com/bmatsuo/lmdb-go/lmdb"
@@ -190,12 +192,15 @@ func (s *Store) Close() error {
 // This operation is atomic with respect to other Put/Delete calls.
 func (s *Store) Put(meta *FileMeta) error {
 	// Normalize and lowercase at index time.
+	// Preserve the original filename (pre-lowercase) for CamelCase word-boundary detection.
+	originalFilename := path.Base(meta.Path)
 	normalizedPath := NormalizePath(meta.Path)
-	normalizedFilename := NormalizeFilename(meta.Path)
+	normalizedFilename := strings.ToLower(originalFilename)
 
 	// Update the meta's path to the normalized version.
 	meta.Path = normalizedPath
 	meta.Filename = normalizedFilename
+	meta.OriginalFilename = originalFilename
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
