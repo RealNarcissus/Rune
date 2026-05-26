@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+backend/vendor/
+
+# Build output
+dist/
+backend/bin/
+src-tauri/target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# LMDB data
+*.mdb
+*.mdb-lock
+
+# Tauri
+src-tauri/gen/

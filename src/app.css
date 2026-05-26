@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* LuminaSearch global styles */
+
+/* Tauri transparent window support */
+html,
+body {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Selection highlight for search results */
+::selection {
+  background: rgba(255, 255, 255, 0.2);
+}
