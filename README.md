@@ -6,7 +6,7 @@ Rune achieves **sub-5ms search latency** and crawls over **1,000,000 files in un
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 Rune uses a decoupled, performance-optimized multi-process architecture:
 
@@ -46,7 +46,7 @@ Rune uses a decoupled, performance-optimized multi-process architecture:
 
 ---
 
-## ⚡ Key Engineering Highlights
+## Key Engineering Highlights
 
 ### 1. Ultra-Compact LMDB Posting Lists & Path Interning
 To scale smoothly up to 1,000,000 files within a tight **500MB RAM budget**, Rune implements a custom indexing architecture over the **Lightning Memory-Mapped Database (LMDB)**:
@@ -69,7 +69,7 @@ Traditional directory-indexing pipelines suffer from consistency gaps if files a
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 * **UI Layer**: Svelte 5, TypeScript, Vite 6, TailwindCSS 4
 * **System Integration**: Tauri v2, Rust
@@ -77,7 +77,7 @@ Traditional directory-indexing pipelines suffer from consistency gaps if files a
 
 ---
 
-## 🚀 Local Development Setup
+## Local Development Setup
 
 ### Prerequisites
 * Go 1.21 or later
@@ -86,7 +86,7 @@ Traditional directory-indexing pipelines suffer from consistency gaps if files a
 
 ### 1. Clone & Install Frontend Dependencies
 ```bash
-git clone https://github.com/<your-username>/Rune.git
+git clone https://github.com/RealNarcissus/Rune.git
 cd Rune
 pnpm install
 ```
@@ -109,6 +109,6 @@ pnpm tauri dev
 
 ---
 
-## ⚖️ License
+## License
 
 Distributed under the Permissive MIT License. See [LICENSE](file:///home/charleton/Desktop/agentProjects/Droid/Rune/LICENSE) for more details.
