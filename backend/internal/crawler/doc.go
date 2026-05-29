@@ -1,4 +1,4 @@
-// Package crawler implements the concurrent directory crawler for LuminaSearch.
+// Package crawler implements the concurrent directory crawler for Rune.
 // It walks directory trees using a bounded goroutine pool, collecting file
 // metadata while handling permission errors, symlink cycles, and ignore patterns.
 //

@@ -1,6 +1,12 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
-/* LuminaSearch global styles */
+/* Rune global styles */
+
+:root {
+  font-family: 'Outfit', sans-serif;
+  color-scheme: dark;
+}
 
 /* Tauri transparent window support */
 html,
@@ -11,9 +17,28 @@ body {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+  height: 100vh;
 }
 
 /* Selection highlight for search results */
 ::selection {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Beautiful custom scrollbar for results list */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
 }

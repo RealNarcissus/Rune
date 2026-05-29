@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lumina-search/backend/internal/index"
+	"github.com/rune/backend/internal/index"
 )
 
 // setupEngine creates a temporary index store, populates it with test data,
@@ -12,7 +12,7 @@ import (
 func setupEngine(t *testing.T, entries []*index.FileMeta) (*Engine, *index.Store, func()) {
 	t.Helper()
 
-	dir, err := os.MkdirTemp("", "luminasearch-query-test-*")
+	dir, err := os.MkdirTemp("", "rune-query-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}

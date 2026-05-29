@@ -1,8 +1,8 @@
 [package]
-name = "lumina-search"
+name = "rune"
 version = "0.1.0"
 description = "Zero-latency desktop file search engine for Linux"
-authors = ["LuminaSearch"]
+authors = ["Rune"]
 edition = "2021"
 
 [lib]

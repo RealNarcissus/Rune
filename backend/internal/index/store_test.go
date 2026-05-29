@@ -14,7 +14,7 @@ import (
 // The caller is responsible for cleanup.
 func tempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "luminasearch-index-test-*")
+	dir, err := os.MkdirTemp("", "rune-index-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestCreateEnv(t *testing.T) {
 
 	// Verify all DBIs exist.
 	err = store.env.View(func(txn *lmdb.Txn) error {
-		for _, name := range []string{dbiNamesPaths, dbiNamesNames, dbiNamesTrigrams, dbiNamesMeta} {
+		for _, name := range []string{dbiNamesPaths, dbiNamesNames, dbiNamesTrigrams, dbiNamesMetadata, dbiNamesMeta} {
 			dbi, dbiErr := txn.OpenDBI(name, 0)
 			if dbiErr != nil {
 				return fmt.Errorf("DBI %q not found: %w", name, dbiErr)
@@ -156,13 +156,27 @@ func TestTrieBuildFromLMDB(t *testing.T) {
 	}
 
 	// Every known path should be findable via trie lookup.
-	result := store2.trie.Search("readme.md")
-	if _, ok := result["/a/readme.md"]; !ok {
+	resultIDs := store2.trie.Search("readme.md")
+	found := false
+	for _, id := range resultIDs {
+		if store2.ResolveIDToPath(id) == "/a/readme.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
 		t.Error("expected /a/readme.md in trie search results")
 	}
 
-	result = store2.trie.Search("config.json")
-	if _, ok := result["/b/config.json"]; !ok {
+	resultIDs = store2.trie.Search("config.json")
+	found = false
+	for _, id := range resultIDs {
+		if store2.ResolveIDToPath(id) == "/b/config.json" {
+			found = true
+			break
+		}
+	}
+	if !found {
 		t.Error("expected /b/config.json in trie search results")
 	}
 }
@@ -202,12 +216,19 @@ func TestTrigramBuildFromLMDB(t *testing.T) {
 
 	// For filename "readme.md", trigrams "rea", "ead", "adm", "dme" should all map to the entry.
 	for _, trigram := range []string{"rea", "ead", "adm", "dme"} {
-		result := store2.trigrams.Search(trigram)
-		if result == nil {
+		resultIDs := store2.trigrams.Search(trigram)
+		if len(resultIDs) == 0 {
 			t.Errorf("trigram %q not found in index", trigram)
 			continue
 		}
-		if _, ok := result["/home/user/readme.md"]; !ok {
+		found := false
+		for _, id := range resultIDs {
+			if store2.ResolveIDToPath(id) == "/home/user/readme.md" {
+				found = true
+				break
+			}
+		}
+		if !found {
 			t.Errorf("expected /home/user/readme.md in search for trigram %q", trigram)
 		}
 	}
@@ -306,20 +327,37 @@ func TestIncrementalInsert(t *testing.T) {
 
 	// Verify in trie.
 	trieResult := store.trie.Search("testfile.txt")
-	if _, ok := trieResult["/tmp/testfile.txt"]; !ok {
+	found := false
+	for _, id := range trieResult {
+		if store.ResolveIDToPath(id) == "/tmp/testfile.txt" {
+			found = true
+			break
+		}
+	}
+	if !found {
 		t.Error("entry not found in trie")
 	}
 
 	// Verify in trigram index.
 	trigramResult := store.trigrams.Search("tes")
-	if trigramResult == nil {
+	if len(trigramResult) == 0 {
 		t.Error("trigram 'tes' not found")
-	} else if _, ok := trigramResult["/tmp/testfile.txt"]; !ok {
-		t.Error("entry not found in trigram index")
+	} else {
+		found = false
+		for _, id := range trigramResult {
+			if store.ResolveIDToPath(id) == "/tmp/testfile.txt" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("entry not found in trigram index")
+		}
 	}
 
 	// Verify in metadata cache.
-	if _, ok := store.metaCache["/tmp/testfile.txt"]; !ok {
+	pathID := store.pathCache["/tmp/testfile.txt"]
+	if _, ok := store.metaCache[pathID]; !ok {
 		t.Error("entry not found in metadata cache")
 	}
 }
@@ -362,20 +400,32 @@ func TestIncrementalDelete(t *testing.T) {
 
 	// Verify removed from trie.
 	trieResult := store.trie.Search("to_delete.txt")
-	if _, ok := trieResult["/tmp/to_delete.txt"]; ok {
+	found := false
+	for _, id := range trieResult {
+		if store.ResolveIDToPath(id) == "/tmp/to_delete.txt" {
+			found = true
+			break
+		}
+	}
+	if found {
 		t.Error("entry still present in trie after delete")
 	}
 
 	// Verify removed from trigram index.
 	trigramResult := store.trigrams.Search("del")
-	if trigramResult != nil {
-		if _, ok := trigramResult["/tmp/to_delete.txt"]; ok {
-			t.Error("entry still present in trigram index after delete")
+	found = false
+	for _, id := range trigramResult {
+		if store.ResolveIDToPath(id) == "/tmp/to_delete.txt" {
+			found = true
+			break
 		}
+	}
+	if found {
+		t.Error("entry still present in trigram index after delete")
 	}
 
 	// Verify removed from metadata cache.
-	if _, ok := store.metaCache["/tmp/to_delete.txt"]; ok {
+	if _, ok := store.pathCache["/tmp/to_delete.txt"]; ok {
 		t.Error("entry still present in metadata cache after delete")
 	}
 }
@@ -575,14 +625,24 @@ func TestMultipleEntries(t *testing.T) {
 	}
 
 	// Both should be findable via the trie.
-	result := store.trie.Search("readme.md")
-	if len(result) < 2 {
-		t.Errorf("expected at least 2 results, got %d", len(result))
+	resultIDs := store.trie.Search("readme.md")
+	if len(resultIDs) < 2 {
+		t.Errorf("expected at least 2 results, got %d", len(resultIDs))
 	}
-	if _, ok := result["/a/readme.md"]; !ok {
+	found1, found2 := false, false
+	for _, id := range resultIDs {
+		p := store.ResolveIDToPath(id)
+		if p == "/a/readme.md" {
+			found1 = true
+		}
+		if p == "/b/readme.md" {
+			found2 = true
+		}
+	}
+	if !found1 {
 		t.Error("expected /a/readme.md in results")
 	}
-	if _, ok := result["/b/readme.md"]; !ok {
+	if !found2 {
 		t.Error("expected /b/readme.md in results")
 	}
 }
@@ -750,28 +810,43 @@ func TestPutDuplicatePath(t *testing.T) {
 func TestTrigramSearch(t *testing.T) {
 	ti := NewTrigramIndex()
 
-	ti.Insert("document", "/path/to/document.pdf")
-	ti.Insert("download", "/path/to/download.zip")
+	ti.Insert("document", 1)
+	ti.Insert("download", 2)
 
 	// Search for "doc" trigrams: "doc", "ocu"
-	result := ti.Search("doc")
-	if result == nil {
+	resultIDs := ti.Search("doc")
+	if len(resultIDs) == 0 {
 		t.Error("expected results for trigram search 'doc'")
 	}
-	if _, ok := result["/path/to/document.pdf"]; !ok {
-		t.Error("expected /path/to/document.pdf in results")
+	found1, found2 := false, false
+	for _, id := range resultIDs {
+		if id == 1 {
+			found1 = true
+		}
+		if id == 2 {
+			found2 = true
+		}
 	}
-	if _, ok := result["/path/to/download.zip"]; ok {
-		t.Error("/path/to/download.zip should not be in 'doc' results")
+	if !found1 {
+		t.Error("expected ID 1 in results")
+	}
+	if found2 {
+		t.Error("ID 2 should not be in 'doc' results")
 	}
 
 	// Search for "dow" trigrams: "dow", "own"
-	result = ti.Search("dow")
-	if result == nil {
+	resultIDs = ti.Search("dow")
+	if len(resultIDs) == 0 {
 		t.Error("expected results for trigram search 'dow'")
 	}
-	if _, ok := result["/path/to/download.zip"]; !ok {
-		t.Error("expected /path/to/download.zip in 'dow' results")
+	found2 = false
+	for _, id := range resultIDs {
+		if id == 2 {
+			found2 = true
+		}
+	}
+	if !found2 {
+		t.Error("expected ID 2 in 'dow' results")
 	}
 }
 
@@ -779,14 +854,18 @@ func TestTrigramSearch(t *testing.T) {
 func TestTrigramDelete(t *testing.T) {
 	ti := NewTrigramIndex()
 
-	ti.Insert("document", "/path/to/document.pdf")
-	ti.Delete("document", "/path/to/document.pdf")
+	ti.Insert("document", 1)
+	ti.Delete("document", 1)
 
-	result := ti.Search("doc")
-	if result != nil {
-		if _, ok := result["/path/to/document.pdf"]; ok {
-			t.Error("entry should have been removed from trigram index")
+	resultIDs := ti.Search("doc")
+	found := false
+	for _, id := range resultIDs {
+		if id == 1 {
+			found = true
 		}
+	}
+	if found {
+		t.Error("entry should have been removed from trigram index")
 	}
 }
 
@@ -794,24 +873,36 @@ func TestTrigramDelete(t *testing.T) {
 func TestTrieDelete(t *testing.T) {
 	trie := NewPrefixTrie()
 
-	trie.Insert("document.pdf", "/path/to/document.pdf")
-	trie.Insert("download.zip", "/path/to/download.zip")
+	trie.Insert("document.pdf", 1)
+	trie.Insert("download.zip", 2)
 
-	result := trie.Search("document.pdf")
-	if len(result) != 1 {
-		t.Errorf("expected 1 result, got %d", len(result))
+	resultIDs := trie.Search("document.pdf")
+	if len(resultIDs) != 1 {
+		t.Errorf("expected 1 result, got %d", len(resultIDs))
 	}
 
-	trie.Delete("document.pdf", "/path/to/document.pdf")
+	trie.Delete("document.pdf", 1)
 
-	result = trie.Search("document.pdf")
-	if _, ok := result["/path/to/document.pdf"]; ok {
+	resultIDs = trie.Search("document.pdf")
+	found := false
+	for _, id := range resultIDs {
+		if id == 1 {
+			found = true
+		}
+	}
+	if found {
 		t.Error("entry should have been removed from trie")
 	}
 
 	// The other entry should still be there.
-	result = trie.Search("download.zip")
-	if _, ok := result["/path/to/download.zip"]; !ok {
+	resultIDs = trie.Search("download.zip")
+	found = false
+	for _, id := range resultIDs {
+		if id == 2 {
+			found = true
+		}
+	}
+	if !found {
 		t.Error("other entry should still be in trie")
 	}
 }
@@ -822,11 +913,11 @@ func TestExtractTrigrams(t *testing.T) {
 		input    string
 		expected int
 	}{
-		{"hello", 3},            // hel, ell, llo
-		{"ab", 0},               // too short
-		{"abc", 1},              // abc
-		{"document", 6},         // doc, ocu, cum, ume, men, ent
-		{"aaa", 1},              // aaa (unique only)
+		{"hello", 3},   // hel, ell, llo
+		{"ab", 0},      // too short
+		{"abc", 1},     // abc
+		{"document", 6}, // doc, ocu, cum, ume, men, ent
+		{"aaa", 1},     // aaa (unique only)
 	}
 
 	for _, tt := range tests {
@@ -844,22 +935,34 @@ func TestExtractTrigrams(t *testing.T) {
 func TestTriePrefixSearch(t *testing.T) {
 	trie := NewPrefixTrie()
 
-	trie.Insert("document.pdf", "/a/document.pdf")
-	trie.Insert("download.zip", "/b/download.zip")
-	trie.Insert("dockerfile", "/c/dockerfile")
+	trie.Insert("document.pdf", 1)
+	trie.Insert("download.zip", 2)
+	trie.Insert("dockerfile", 3)
 
 	// Prefix "doc" should match document.pdf and dockerfile but not download.zip.
-	result := trie.Search("doc")
-	if result == nil {
+	resultIDs := trie.Search("doc")
+	if len(resultIDs) == 0 {
 		t.Fatal("expected results for prefix 'doc'")
 	}
-	if _, ok := result["/a/document.pdf"]; !ok {
-		t.Error("expected /a/document.pdf in prefix results")
+	found1, found2, found3 := false, false, false
+	for _, id := range resultIDs {
+		if id == 1 {
+			found1 = true
+		}
+		if id == 2 {
+			found2 = true
+		}
+		if id == 3 {
+			found3 = true
+		}
 	}
-	if _, ok := result["/c/dockerfile"]; !ok {
-		t.Error("expected /c/dockerfile in prefix results")
+	if !found1 {
+		t.Error("expected ID 1 in prefix results")
 	}
-	if _, ok := result["/b/download.zip"]; ok {
+	if !found3 {
+		t.Error("expected ID 3 in prefix results")
+	}
+	if found2 {
 		t.Error("download.zip should NOT be in 'doc' prefix results")
 	}
 }
@@ -896,7 +999,7 @@ func contains(s, substr string) bool {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	// Clean up any leftover temp data directories.
-	entries, _ := filepath.Glob(os.TempDir() + "/luminasearch-index-test-*")
+	entries, _ := filepath.Glob(os.TempDir() + "/rune-index-test-*")
 	for _, e := range entries {
 		os.RemoveAll(e)
 	}

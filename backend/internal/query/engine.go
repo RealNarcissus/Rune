@@ -1,13 +1,13 @@
 package query
 
 import (
+	"container/heap"
 	"errors"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/lumina-search/backend/internal/index"
+	"github.com/rune/backend/internal/index"
 )
 
 // Tier constants for the 4-tier ranking system.
@@ -36,7 +36,7 @@ type Result struct {
 type Engine struct {
 	trie     *index.PrefixTrie
 	trigrams *index.TrigramIndex
-	meta     map[string]*index.FileMeta
+	meta     map[uint32]*index.FileMeta
 }
 
 // NewEngine creates a new query engine backed by the given store's
@@ -50,26 +50,50 @@ func NewEngine(store *index.Store) *Engine {
 	}
 }
 
+// ranksHigher reports whether Result a is higher ranking than Result b.
+// Tiebreaking rules: directories rank above files, then shallower depth first,
+// then alphabetical by filename (case-insensitive).
+func ranksHigher(a, b Result) bool {
+	if a.Tier != b.Tier {
+		return a.Tier < b.Tier
+	}
+	if a.IsDir != b.IsDir {
+		return a.IsDir
+	}
+	if a.Depth != b.Depth {
+		return a.Depth < b.Depth
+	}
+	return strings.ToLower(a.Filename) < strings.ToLower(b.Filename)
+}
+
+// resultMinHeap implements heap.Interface and holds the top-N results.
+// It acts as a min-heap based on ranking: the root of the heap is the
+// WORST ranking result. This allows us to keep the N best results.
+type resultMinHeap []Result
+
+func (h resultMinHeap) Len() int           { return len(h) }
+func (h resultMinHeap) Less(i, j int) bool { return !ranksHigher(h[i], h[j]) } // Worst item at index 0
+func (h resultMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *resultMinHeap) Push(x interface{}) {
+	*h = append(*h, x.(Result))
+}
+func (h *resultMinHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
 // Search executes a query and returns ranked results according to the
-// 4-tier ranking system:
+// 4-tier ranking system.
 //
-//	Tier 1: Exact filename match
-//	Tier 2: Prefix match (filename starts with query)
-//	Tier 3: Word-boundary match (_, -, ., or CamelCase boundary)
-//	Tier 4: Substring match (query appears anywhere in filename)
-//
-// Within each tier, directories rank above files (directory boost).
-// Tiebreaking: shallower depth first, then alphabetical by filename (case-insensitive).
-//
-// The query is normalized (lowercased, trimmed) once at entry.
-// limit must be >= 0. limit=0 returns an empty slice without scanning.
-// Negative limit returns ErrNegativeLimit.
-//
-// Early termination: once `limit` results have been collected from higher
-// tiers, lower tiers are skipped entirely.
+// All query operations enforce the Hot Path Constraints:
+// - Bounded Top-N min-heap ranking to maintain sub-5ms latency.
+// - All operations run fully in-RAM with no JSON decoding or LMDB writes.
 func (e *Engine) Search(query string, limit int) ([]Result, error) {
-	// Normalize query: trim whitespace and lowercase.
-	query = strings.TrimSpace(strings.ToLower(query))
+	// Normalize query: NFC Unicode normalization and lowercase.
+	query = strings.TrimSpace(strings.ToLower(index.NormalizeUnicode(query)))
 
 	if limit < 0 {
 		return nil, ErrNegativeLimit
@@ -78,131 +102,129 @@ func (e *Engine) Search(query string, limit int) ([]Result, error) {
 		return []Result{}, nil
 	}
 
-	seen := make(map[string]bool, 256)
-	var results []Result
+	h := &resultMinHeap{}
+	heap.Init(h)
+
+	seen := make(map[uint32]bool, 256)
 
 	// Phase 1: Collect prefix-based matches from the trie.
-	// The trie returns all paths whose filenames start with the query.
-	// From these we extract tier 1 (exact) and tier 2 (prefix) matches.
 	trieResults := e.trie.Search(query)
 
 	// ---- Tier 1: Exact match ----
-	for path := range trieResults {
-		meta, ok := e.meta[path]
+	for _, pathID := range trieResults {
+		meta, ok := e.meta[pathID]
 		if !ok {
 			continue
 		}
 		if meta.Filename == query {
-			results = append(results, Result{
+			r := Result{
 				Path:     meta.Path,
 				Filename: meta.Filename,
 				IsDir:    meta.IsDir,
 				Depth:    meta.Depth,
 				Tier:     TierExact,
-			})
-			seen[path] = true
+			}
+			seen[pathID] = true
+			pushBest(h, r, limit)
 		}
-	}
-
-	sortResults(results)
-	if limit > 0 && len(results) >= limit {
-		return results[:limit], nil
 	}
 
 	// ---- Tier 2: Prefix match ----
-	for path := range trieResults {
-		if seen[path] {
+	for _, pathID := range trieResults {
+		if seen[pathID] {
 			continue
 		}
-		meta, ok := e.meta[path]
+		meta, ok := e.meta[pathID]
 		if !ok {
 			continue
 		}
 		if strings.HasPrefix(meta.Filename, query) {
-			results = append(results, Result{
+			r := Result{
 				Path:     meta.Path,
 				Filename: meta.Filename,
 				IsDir:    meta.IsDir,
 				Depth:    meta.Depth,
 				Tier:     TierPrefix,
-			})
-			seen[path] = true
+			}
+			seen[pathID] = true
+			pushBest(h, r, limit)
 		}
-	}
-
-	sortResults(results)
-	if limit > 0 && len(results) >= limit {
-		return results[:limit], nil
 	}
 
 	// Phase 2: Collect substring-based matches from the trigram index.
-	// The trigram index returns all paths whose filenames contain ALL
-	// trigrams of the query. From these we extract tier 3 (word-boundary)
-	// and tier 4 (substring) matches.
-	trigramResults := e.trigrams.Search(query)
-	if trigramResults != nil {
-		// ---- Tier 3: Word-boundary match ----
-		for path := range trigramResults {
-			if seen[path] {
-				continue
+	// For queries shorter than 3 characters, we skip trigrams entirely (Short Query Policy).
+	if len([]rune(query)) >= 3 {
+		trigramResults := e.trigrams.Search(query)
+		if trigramResults != nil {
+			// ---- Tier 3: Word-boundary match ----
+			for _, pathID := range trigramResults {
+				if seen[pathID] {
+					continue
+				}
+				meta, ok := e.meta[pathID]
+				if !ok {
+					continue
+				}
+				if isWordBoundaryMatch(meta.OriginalFilename, query) {
+					r := Result{
+						Path:     meta.Path,
+						Filename: meta.Filename,
+						IsDir:    meta.IsDir,
+						Depth:    meta.Depth,
+						Tier:     TierWordBoundary,
+					}
+					seen[pathID] = true
+					pushBest(h, r, limit)
+				}
 			}
-			meta, ok := e.meta[path]
-			if !ok {
-				continue
-			}
-			if isWordBoundaryMatch(meta.OriginalFilename, query) {
-				results = append(results, Result{
-					Path:     meta.Path,
-					Filename: meta.Filename,
-					IsDir:    meta.IsDir,
-					Depth:    meta.Depth,
-					Tier:     TierWordBoundary,
-				})
-				seen[path] = true
+
+			// ---- Tier 4: Substring match ----
+			for _, pathID := range trigramResults {
+				if seen[pathID] {
+					continue
+				}
+				meta, ok := e.meta[pathID]
+				if !ok {
+					continue
+				}
+				if strings.Contains(meta.Filename, query) {
+					r := Result{
+						Path:     meta.Path,
+						Filename: meta.Filename,
+						IsDir:    meta.IsDir,
+						Depth:    meta.Depth,
+						Tier:     TierSubstring,
+					}
+					pushBest(h, r, limit)
+				}
 			}
 		}
-
-		sortResults(results)
-		if limit > 0 && len(results) >= limit {
-			return results[:limit], nil
-		}
-
-		// ---- Tier 4: Substring match ----
-		for path := range trigramResults {
-			if seen[path] {
-				continue
-			}
-			meta, ok := e.meta[path]
-			if !ok {
-				continue
-			}
-			if strings.Contains(meta.Filename, query) {
-				results = append(results, Result{
-					Path:     meta.Path,
-					Filename: meta.Filename,
-					IsDir:    meta.IsDir,
-					Depth:    meta.Depth,
-					Tier:     TierSubstring,
-				})
-			}
-		}
-
-		sortResults(results)
 	}
 
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
+	// Extract and sort results from the heap in descending order of quality
+	resultLen := h.Len()
+	results := make([]Result, resultLen)
+	for i := resultLen - 1; i >= 0; i-- {
+		results[i] = heap.Pop(h).(Result)
 	}
 
 	return results, nil
 }
 
+// pushBest inserts a new result into the min-heap. If the heap is full,
+// it replaces the worst result in the heap if the new result is higher ranking.
+func pushBest(h *resultMinHeap, r Result, limit int) {
+	if h.Len() < limit {
+		heap.Push(h, r)
+	} else if ranksHigher(r, (*h)[0]) { // (*h)[0] is the worst item in the heap
+		heap.Pop(h)
+		heap.Push(h, r)
+	}
+}
+
 // isWordBoundaryMatch checks whether the lowercased query appears at a word
 // boundary in the original (pre-lowercased) filename. This enables accurate
 // CamelCase boundary detection that would be lost in the lowercased form.
-//
-// Word boundaries are: start of string, or after _, -, ., or at a lowercase
-// to uppercase transition (CamelCase).
 func isWordBoundaryMatch(originalFilename, lowerQuery string) bool {
 	if originalFilename == "" {
 		return false
@@ -224,23 +246,16 @@ func isWordBoundaryMatch(originalFilename, lowerQuery string) bool {
 }
 
 // isWordBoundary returns true if the byte position pos in s is at a word boundary.
-// A word boundary is defined as:
-//   - Position 0 (start of string)
-//   - After an underscore (_), hyphen (-), or dot (.)
-//   - At a lowercase→uppercase transition (CamelCase boundary)
 func isWordBoundary(s string, pos int) bool {
 	if pos == 0 {
 		return true
 	}
 
-	// Check for explicit separator characters (all ASCII, safe as bytes).
 	prev := s[pos-1]
 	if prev == '_' || prev == '-' || prev == '.' {
 		return true
 	}
 
-	// Check for CamelCase boundary: lowercase→uppercase transition.
-	// Use UTF-8 decoding for proper Unicode support.
 	currRune, _ := utf8.DecodeRuneInString(s[pos:])
 	prevRune, size := utf8.DecodeLastRuneInString(s[:pos])
 	if size > 0 && prevRune != utf8.RuneError && currRune != utf8.RuneError {
@@ -250,34 +265,4 @@ func isWordBoundary(s string, pos int) bool {
 	}
 
 	return false
-}
-
-// sortResults sorts results by tier, then directory boost, then depth,
-// then filename (case-insensitive alphabetical). This ensures:
-//   - All tier 1 results come before all tier 2 results, etc.
-//   - Within the same tier, directories come before files (directory boost).
-//   - Within the same tier and type, shallower depth comes first.
-//   - Within the same tier, type, and depth, alphabetical order by filename.
-func sortResults(results []Result) {
-	sort.Slice(results, func(i, j int) bool {
-		a, b := results[i], results[j]
-
-		// Tier: lower tier number = higher rank.
-		if a.Tier != b.Tier {
-			return a.Tier < b.Tier
-		}
-
-		// Directory boost: directories rank above files at same tier.
-		if a.IsDir != b.IsDir {
-			return a.IsDir
-		}
-
-		// Tiebreak 1: shallower depth first.
-		if a.Depth != b.Depth {
-			return a.Depth < b.Depth
-		}
-
-		// Tiebreak 2: alphabetical by filename (case-insensitive).
-		return strings.ToLower(a.Filename) < strings.ToLower(b.Filename)
-	})
 }

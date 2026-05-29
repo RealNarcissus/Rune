@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/lumina-search/backend/internal/index"
+	"github.com/rune/backend/internal/index"
 )
 
 // DefaultIgnorePatterns are directory basenames that are never entered
@@ -179,6 +179,9 @@ func (c *Crawler) Crawl(ctx context.Context, root string) (int64, error) {
 			}
 
 			name := entry.Name()
+			if entry.IsDir() && name != "." && name != ".." && strings.HasPrefix(name, ".") {
+				continue
+			}
 			fullPath := filepath.Join(dir, name)
 
 			// Handle symlinks specially.
@@ -233,7 +236,9 @@ func (c *Crawler) Crawl(ctx context.Context, root string) (int64, error) {
 }
 
 // dispatchDir sends a directory path to be crawled in a new goroutine,
-// bounded by the semaphore. It respects context cancellation.
+// bounded by the semaphore. If the semaphore pool is full, it falls back
+// to processing the directory synchronously in the current goroutine to
+// prevent deadlocks. It respects context cancellation.
 func (c *Crawler) dispatchDir(
 	ctx context.Context,
 	dirPath string,
@@ -253,6 +258,9 @@ func (c *Crawler) dispatchDir(
 			}()
 			crawlDir(p)
 		}(dirPath)
+	default:
+		// Pool is full, process synchronously to prevent deadlock
+		crawlDir(dirPath)
 	}
 }
 

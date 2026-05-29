@@ -1,4 +1,4 @@
-// Package index manages the LMDB index store for LuminaSearch.
+// Package index manages the LMDB index store for Rune.
 // It provides operations for creating/opening the LMDB environment,
 // reading and writing file metadata records, and managing the
 // in-memory search indexes (prefix trie, trigram inverted index).

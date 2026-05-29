@@ -1,10 +1,10 @@
 # THINKING.md — GStack Phase 1: Linux Filesystem Constraints Analysis
 
-## LuminaSearch: Design Rationale for User-Space Walking
+## Rune: Design Rationale for User-Space Walking
 
 ### Problem Statement
 
-LuminaSearch needs to discover and track every file on the user's filesystem with
+Rune needs to discover and track every file on the user's filesystem with
 near-zero latency. The naive approach — a full recursive directory walk on every
 query — is far too slow for a search-as-you-type experience. This document
 captures the Phase 1 design analysis of why we chose user-space directory walking
@@ -71,7 +71,7 @@ Reading raw block devices requires either:
 - `root` (or `CAP_SYS_ADMIN` + read access to the device node)
 - Or membership in the `disk` group (which grants raw device read)
 
-LuminaSearch runs as a user-level application. Requiring elevated privileges
+Rune runs as a user-level application. Requiring elevated privileges
 for indexing is a non-starter for security and UX reasons.
 
 ### 4. Cross-Filesystem Compatibility Explosion
@@ -117,7 +117,7 @@ change — create, delete, modify, rename — with zero polling overhead.
 
 ### Phase 1: Full Recursive Directory Walk
 
-At startup, LuminaSearch performs a bounded-concurrency directory walk using
+At startup, Rune performs a bounded-concurrency directory walk using
 standard system calls:
 
 ```
@@ -204,7 +204,7 @@ any of the pitfalls of raw block parsing:
 - **Performance:** The bottleneck is disk I/O, not syscall overhead.
   `getdents64()` is fast enough. inotify gives us real-time updates for free.
 
-This design decision is the foundation of LuminaSearch's architecture and
+This design decision is the foundation of Rune's architecture and
 informs every subsequent implementation choice. The LMDB index store, the
 in-memory search indexes, the query engine — all are built on the assumption
 that file discovery happens through the kernel's VFS layer, not around it.

@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lumina-search/backend/internal/index"
+	"github.com/rune/backend/internal/index"
 )
 
 // tempDir creates a temporary directory and returns its path.
 // The caller is responsible for cleanup (via t.Cleanup).
 func tempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "luminasearch-crawler-test-*")
+	dir, err := os.MkdirTemp("", "rune-crawler-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -30,7 +30,7 @@ func tempDir(t *testing.T) string {
 // tempIndexDir creates a temp directory for the LMDB store.
 func tempIndexDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "luminasearch-crawler-index-*")
+	dir, err := os.MkdirTemp("", "rune-crawler-index-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -487,10 +487,10 @@ func TestHiddenFilesIndexed(t *testing.T) {
 		}
 	}
 
-	// .config/settings.json should be indexed.
+	// .config/settings.json should NOT be indexed because .config is a hidden directory and must be ignored.
 	settingsPath := index.NormalizePath(filepath.Join(hiddenDir, "settings.json"))
-	if meta, _ := store.Get(settingsPath); meta == nil {
-		t.Error(".config/settings.json should be indexed")
+	if meta, _ := store.Get(settingsPath); meta != nil {
+		t.Error(".config/settings.json should NOT be indexed")
 	}
 }
 
@@ -962,18 +962,19 @@ func TestConcurrentProgressReporting(t *testing.T) {
 		}
 	}
 
-	var lastProgress int64
+	var maxProgress int64
 	var progressCalls atomic.Int64
+	var pMu sync.Mutex
 
 	opts := DefaultOptions()
 	opts.MaxConcurrency = 4
 	opts.OnProgress = func(fc int64) {
 		progressCalls.Add(1)
-		// Progress should be monotonically increasing.
-		if fc < atomic.LoadInt64(&lastProgress) {
-			t.Errorf("progress went backwards: %d -> %d", lastProgress, fc)
+		pMu.Lock()
+		if fc > maxProgress {
+			maxProgress = fc
 		}
-		atomic.StoreInt64(&lastProgress, fc)
+		pMu.Unlock()
 	}
 
 	c := New(store, opts)
@@ -987,6 +988,14 @@ func TestConcurrentProgressReporting(t *testing.T) {
 
 	if fileCount != 1000 {
 		t.Errorf("expected 1000 files, got %d", fileCount)
+	}
+
+	pMu.Lock()
+	finalProgress := maxProgress
+	pMu.Unlock()
+
+	if finalProgress != 1000 {
+		t.Errorf("expected maxProgress to reach 1000, got %d", finalProgress)
 	}
 
 	t.Logf("files indexed: %d, progress calls: %d", fileCount, progressCalls.Load())

@@ -1,13 +1,16 @@
 package index
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 // TrieNode represents a node in the prefix trie.
 // Each node maps the next character to its child node and
-// holds the set of paths that end at or pass through this node.
+// holds the compact list of path IDs ending at this node.
 type TrieNode struct {
 	children map[rune]*TrieNode
-	paths    map[string]struct{} // set of full paths
+	pathIDs  []uint32 // Compact sorted slice of path IDs ending at this node
 	mu       sync.RWMutex
 }
 
@@ -15,7 +18,6 @@ type TrieNode struct {
 func newTrieNode() *TrieNode {
 	return &TrieNode{
 		children: make(map[rune]*TrieNode),
-		paths:    make(map[string]struct{}),
 	}
 }
 
@@ -34,9 +36,9 @@ func NewPrefixTrie() *PrefixTrie {
 	}
 }
 
-// Insert adds a filename→path mapping to the trie.
+// Insert adds a filename→pathID mapping to the trie.
 // The filename should already be lowercased.
-func (t *PrefixTrie) Insert(filename, fullPath string) {
+func (t *PrefixTrie) Insert(filename string, pathID uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -52,27 +54,41 @@ func (t *PrefixTrie) Insert(filename, fullPath string) {
 		node = child
 	}
 
-	// Mark this path at the terminal node and all ancestor nodes
-	// to support prefix lookup at intermediate nodes.
 	node.mu.Lock()
-	node.paths[fullPath] = struct{}{}
+	// Insert pathID in sorted order if not present
+	idx := sort.Search(len(node.pathIDs), func(i int) bool {
+		return node.pathIDs[i] >= pathID
+	})
+	if idx < len(node.pathIDs) && node.pathIDs[idx] == pathID {
+		// Already present
+	} else {
+		// Insert at idx
+		node.pathIDs = append(node.pathIDs, 0)
+		copy(node.pathIDs[idx+1:], node.pathIDs[idx:])
+		node.pathIDs[idx] = pathID
+	}
 	node.mu.Unlock()
 }
 
-// Delete removes a filename→path mapping from the trie.
-func (t *PrefixTrie) Delete(filename, fullPath string) {
+// Delete removes a filename→pathID mapping from the trie.
+func (t *PrefixTrie) Delete(filename string, pathID uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.deleteRecursive(t.root, []rune(filename), fullPath, 0)
+	t.deleteRecursive(t.root, []rune(filename), pathID, 0)
 }
 
-func (t *PrefixTrie) deleteRecursive(node *TrieNode, chars []rune, fullPath string, depth int) bool {
+func (t *PrefixTrie) deleteRecursive(node *TrieNode, chars []rune, pathID uint32, depth int) bool {
 	if depth == len(chars) {
-		// Terminal node: remove this specific path
 		node.mu.Lock()
-		delete(node.paths, fullPath)
-		hasPaths := len(node.paths) > 0
+		// Remove pathID from slice
+		idx := sort.Search(len(node.pathIDs), func(i int) bool {
+			return node.pathIDs[i] >= pathID
+		})
+		if idx < len(node.pathIDs) && node.pathIDs[idx] == pathID {
+			node.pathIDs = append(node.pathIDs[:idx], node.pathIDs[idx+1:]...)
+		}
+		hasPaths := len(node.pathIDs) > 0
 		hasChildren := len(node.children) > 0
 		node.mu.Unlock()
 		return !hasPaths && !hasChildren
@@ -87,24 +103,24 @@ func (t *PrefixTrie) deleteRecursive(node *TrieNode, chars []rune, fullPath stri
 		return false
 	}
 
-	shouldPrune := t.deleteRecursive(child, chars, fullPath, depth+1)
+	shouldPrune := t.deleteRecursive(child, chars, pathID, depth+1)
 	if shouldPrune {
 		node.mu.Lock()
 		delete(node.children, ch)
 		node.mu.Unlock()
 	}
 
-	// Check if this node should be pruned too
 	node.mu.RLock()
 	hasChildren := len(node.children) > 0
-	hasPaths := len(node.paths) > 0
+	hasPaths := len(node.pathIDs) > 0
 	node.mu.RUnlock()
 	return !hasChildren && !hasPaths && depth > 0
 }
 
-// Search returns all paths whose filenames start with the given prefix.
+// Search returns all path IDs whose filenames start with the given prefix.
 // The prefix should be lowercased.
-func (t *PrefixTrie) Search(prefix string) map[string]struct{} {
+// Results are returned as a sorted slice of uint32 IDs.
+func (t *PrefixTrie) Search(prefix string) []uint32 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -120,31 +136,40 @@ func (t *PrefixTrie) Search(prefix string) map[string]struct{} {
 		node = child
 	}
 
-	// Collect all paths in the subtree
+	// Collect all paths in the subtree recursively
 	return t.collectPaths(node)
 }
 
-func (t *PrefixTrie) collectPaths(node *TrieNode) map[string]struct{} {
-	result := make(map[string]struct{})
+func (t *PrefixTrie) collectPaths(node *TrieNode) []uint32 {
+	var result []uint32
+	seen := make(map[uint32]bool)
 
-	// Collect paths at this node
-	node.mu.RLock()
-	for p := range node.paths {
-		result[p] = struct{}{}
-	}
-	for _, child := range node.children {
-		childPaths := t.collectPaths(child)
-		for p := range childPaths {
-			result[p] = struct{}{}
+	var walk func(*TrieNode)
+	walk = func(n *TrieNode) {
+		n.mu.RLock()
+		for _, id := range n.pathIDs {
+			if !seen[id] {
+				seen[id] = true
+				result = append(result, id)
+			}
 		}
+		for _, child := range n.children {
+			walk(child)
+		}
+		n.mu.RUnlock()
 	}
-	node.mu.RUnlock()
+
+	walk(node)
+
+	// Sort the resulting IDs to keep them predictable/comparable
+	sort.Slice(result, func(i, j int) bool {
+		return result[i] < result[j]
+	})
 
 	return result
 }
 
 // NodeCount returns the total number of nodes in the trie.
-// Useful for testing that the trie was built correctly.
 func (t *PrefixTrie) NodeCount() int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -161,7 +186,7 @@ func (t *PrefixTrie) nodeCount(node *TrieNode) int {
 	return count
 }
 
-// PathCount returns the total number of path references stored.
+// PathCount returns the total number of path ID references stored at terminal nodes.
 func (t *PrefixTrie) PathCount() int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -170,7 +195,7 @@ func (t *PrefixTrie) PathCount() int {
 
 func (t *PrefixTrie) pathCount(node *TrieNode) int {
 	node.mu.RLock()
-	count := len(node.paths)
+	count := len(node.pathIDs)
 	for _, child := range node.children {
 		count += t.pathCount(child)
 	}

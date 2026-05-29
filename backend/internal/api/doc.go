@@ -1,4 +1,4 @@
-// Package api implements the HTTP API layer for LuminaSearch.
+// Package api implements the HTTP API layer for Rune.
 // It exposes endpoints for search queries, service status, health checks,
 // and WebSocket real-time event streaming.
 //

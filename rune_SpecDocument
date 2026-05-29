@@ -1,0 +1,400 @@
+# Rune v1 — Final Architectural Corrections & Locked Decisions
+
+This document supersedes earlier ambiguities and locks the final implementation direction for Rune v1.
+
+---
+
+# 1. Desktop Runtime Decision
+
+## FINAL DECISION
+
+Rune will use:
+
+* Tauri v2
+* Svelte
+* TailwindCSS
+* Go sidecar backend
+
+Wails v2 is no longer part of the architecture.
+
+---
+
+## Rationale
+
+Rune is a UX-centric desktop utility requiring:
+
+* transparent windows
+* borderless overlays
+* compositor-aware rendering
+* global hotkeys
+* low idle memory
+* premium Linux desktop integration
+
+Tauri v2 provides stronger support for:
+
+* modern Linux window behavior
+* transparency handling
+* shell integration
+* lightweight runtime characteristics
+
+The Go backend remains isolated as a sidecar process responsible for:
+
+* crawling
+* indexing
+* query execution
+* filesystem monitoring
+* LMDB interaction
+
+IPC occurs through:
+
+* Unix domain sockets (preferred)
+* lightweight internal IPC bridge
+
+HTTP localhost APIs are acceptable during early development only.
+
+---
+
+# 2. Filesystem Monitoring Architecture
+
+## FINAL DECISION
+
+Rune v1 uses:
+
+* inotify as the PRIMARY monitoring strategy
+* reconciliation scans as mandatory recovery logic
+* fanotify as an OPTIONAL future enhancement
+
+fanotify is NOT required for v1.
+
+---
+
+## Rationale
+
+fanotify solves large-scale watch exhaustion elegantly but introduces:
+
+* CAP_SYS_ADMIN complexity
+* packaging friction
+* distro-specific privilege handling
+* user trust issues
+* deployment instability
+
+The v1 priority is:
+
+* practical deployability
+* normal-user installation
+* predictable behavior across Linux desktops
+
+Rune must install and run without privileged daemons.
+
+---
+
+## inotify Strategy
+
+The monitoring layer MUST:
+
+* recursively register watches
+* gracefully handle descriptor exhaustion
+* detect queue overflow
+* recover through scoped rescans
+* avoid full filesystem reindexing
+
+If watcher limits are exceeded:
+
+* prioritize frequently accessed directories
+* degrade gracefully
+* surface internal warnings
+* preserve search correctness through reconciliation
+
+---
+
+## Recovery Model
+
+When overflow occurs:
+
+DO:
+
+* schedule subtree reconciliation
+* revalidate affected paths incrementally
+* preserve existing indexes
+
+DO NOT:
+
+* destroy indexes
+* full-reindex the filesystem
+* block query responsiveness
+
+---
+
+# 3. Query Execution Rules
+
+## FINAL QUERY PIPELINE
+
+Every query follows:
+
+keydown
+→ normalize
+→ prefix trie lookup
+→ optional trigram intersection
+→ ranking
+→ top-N heap
+→ render
+
+---
+
+## Query Cancellation
+
+All queries MUST be cancellable.
+
+Only the newest query may render results.
+
+Older queries still executing MUST:
+
+* terminate early
+* discard partial work
+* avoid stale UI updates
+
+This is mandatory for responsive search-as-you-type UX.
+
+---
+
+## Query Debounce
+
+The previous 30ms debounce is removed.
+
+Rune must instead use:
+
+* 5–10ms soft debounce
+  OR
+* frame-coalesced dispatch
+
+The system must feel visually instantaneous to fast typists.
+
+30ms dispatch delay is considered perceptible.
+
+---
+
+## Result Cap
+
+Result limits are reduced.
+
+The query engine should return:
+
+* maximum 50–100 ranked results
+
+NOT 200.
+
+The UI visually displays far fewer results than 200.
+
+Smaller caps improve:
+
+* latency
+* cache locality
+* ranking quality
+* predictable performance
+
+---
+
+## Short Query Policy
+
+Queries shorter than 3 characters MUST:
+
+* use prefix search only
+* skip trigram evaluation entirely
+
+Reason:
+
+Single-character trigram searches explode posting-list size and destabilize latency.
+
+Examples:
+
+* e
+* a
+* s
+
+must never trigger full trigram search.
+
+---
+
+# 4. Prefix Trie Constraints
+
+## FINAL MEMORY RULE
+
+Trie nodes store:
+
+* compact file IDs only
+
+Trie nodes MUST NOT store:
+
+* full metadata
+* file structs
+* path strings
+* duplicated filenames
+
+Metadata lookup occurs separately through:
+
+* compact metadata arrays
+* intern pools
+* LMDB-backed persistence
+
+This is mandatory for maintaining:
+
+* sub-500MB RSS targets
+* cache locality
+* predictable traversal performance
+
+---
+
+# 5. TODO / Placeholder Policy Revision
+
+The original rule:
+
+"No TODO comments"
+
+is replaced with:
+
+## FINAL RULE
+
+No TODO/FIXME/HACK comments are permitted on:
+
+* production-critical paths
+* hot query paths
+* mutation pipelines
+* watcher logic
+* persistence layers
+
+Non-critical tracked TODOs are acceptable when:
+
+* explicitly scoped
+* issue-linked
+* not affecting correctness
+
+The intent is:
+
+* prohibit fake implementations
+* prohibit hidden unfinished critical behavior
+
+NOT:
+
+* prohibit all future improvement markers
+
+---
+
+# 6. Frosted Glass / Transparency Policy
+
+## FINAL UI POLICY
+
+Blur and translucency are progressive enhancements.
+
+Rune MUST still feel premium without compositor blur support.
+
+---
+
+## Preferred Rendering
+
+If compositor supports blur:
+
+* transparent Tauri window
+* CSS backdrop-filter
+* soft shadows
+* subtle borders
+
+---
+
+## Fallback Rendering
+
+If blur unsupported:
+
+* semi-transparent dark surface
+* preserved spacing hierarchy
+* preserved typography hierarchy
+* opaque fallback rendering
+
+The UX must remain:
+
+* fast
+* minimal
+* visually coherent
+
+without blur.
+
+---
+
+# 7. Cold Start UX Policy
+
+Rune MUST provide partial usability during initial indexing.
+
+Users must NEVER experience:
+
+* blank UI
+* frozen state
+* "wait until indexing finishes"
+
+During startup:
+
+* partial results stream incrementally
+* indexing progress is visible
+* search remains interactive
+
+Target:
+
+* usable results within 5 seconds
+* even on cold index initialization
+
+---
+
+# 8. Memory Architecture Clarification
+
+The memory budget:
+
+* <500MB RSS target at 1M indexed files
+
+is only achievable if ALL of the following are enforced:
+
+* path interning
+* compact uint32 posting lists
+* immutable read-heavy structures
+* lazy metadata hydration
+* no duplicated strings
+* no per-query allocations
+
+Naive object-heavy Go structures WILL exceed memory limits.
+
+Compact layout enforcement belongs in ARCHITECTURE.md.
+
+---
+
+# 9. Final Locked Architectural Identity
+
+Rune is:
+
+* a Linux-native systems utility
+* RAM-first query engine
+* LMDB-backed persistent indexer
+* keyboard-first desktop launcher
+* Everything-inspired instant filename search tool
+
+Rune is NOT:
+
+* an AI search engine
+* a semantic indexer
+* a cloud platform
+* a distributed service
+* an Electron application
+* a full-text search engine
+
+---
+
+# 10. Final Product Experience Goal
+
+Rune should feel:
+
+* instantaneous
+* invisible
+* lightweight
+* native
+* premium
+* keyboard-centric
+
+The final experience target is:
+
+“The results appear before the user finishes typing.”
